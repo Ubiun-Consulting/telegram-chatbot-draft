@@ -1,0 +1,129 @@
+version: '3.9'
+
+services:
+  # Vector Database
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+    networks:
+      - bot-network
+
+  # PostgreSQL for audit logs
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: bot_audit
+      POSTGRES_USER: bot_user
+      POSTGRES_PASSWORD: bot_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - bot-network
+
+  # Redis for caching and rate limiting
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - bot-network
+
+  # Retrieval Service
+  retrieval-service:
+    build:
+      context: ./services/retrieval-service
+      dockerfile: Dockerfile
+    container_name: retrieval-service
+    ports:
+      - "8080:8080"
+    environment:
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - LLM_GATEWAY_URL=http://ingress-bot:3000
+    depends_on:
+      - chroma
+    networks:
+      - bot-network
+
+  # Ingress Bot
+  ingress-bot:
+    build:
+      context: ./services/ingress-bot
+      dockerfile: Dockerfile
+    container_name: ingress-bot
+    ports:
+      - "3000:3000"
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - RETRIEVAL_URL=http://retrieval-service:8080
+      - AUDIT_URL=http://audit-service:8081
+      - DATABASE_URL=postgresql://bot_user:bot_password@postgres:5432/bot_audit
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - retrieval-service
+      - postgres
+      - redis
+    networks:
+      - bot-network
+    volumes:
+      - ./prompts:/app/prompts:ro
+
+  # Ingest Worker
+  ingest-worker:
+    build:
+      context: ./services/ingest-worker
+      dockerfile: Dockerfile
+    container_name: ingest-worker
+    environment:
+      - CORPUS_DIR=/app/corpus
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - RETRIEVAL_URL=http://retrieval-service:8080
+    depends_on:
+      - retrieval-service
+    networks:
+      - bot-network
+    volumes:
+      - ./corpus:/app/corpus:ro
+      - ./processed_files.txt:/app/processed_files.txt
+
+  # Ollama (optional, for local LLM)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - bot-network
+    profiles:
+      - local-llm
+
+volumes:
+  chroma_data:
+  postgres_data:
+  redis_data:
+  ollama_data:
+
+networks:
+  bot-network:
+    driver: bridge 
